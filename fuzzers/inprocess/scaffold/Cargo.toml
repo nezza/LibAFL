@@ -26,7 +26,8 @@ libafl = { path = "../../../libafl", features = [
   "std",
   "derive",
   "llmp_compression",
-  "introspection",
+  #"introspection",
+  "tui_monitor",
 ] }
 libafl_bolts = { path = "../../../libafl_bolts" }
 libafl_targets = { path = "../../../libafl_targets", features = [
@@ -41,5 +42,6 @@ log = { version = "0.4.22", features = ["release_max_level_info"] }
 mimalloc = { version = "0.1.43", default-features = false }
 
 [lib]
-name = "libfuzzer_libpng"
+# This create the library that contains the actual fuzzer
+name = "libafl_runtime"
 crate-type = ["staticlib"]

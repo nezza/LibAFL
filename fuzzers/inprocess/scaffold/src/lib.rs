@@ -14,7 +14,7 @@ use libafl::{
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     fuzzer::{Fuzzer, StdFuzzer},
     inputs::{BytesInput, HasTargetBytes},
-    monitors::{MultiMonitor, OnDiskTomlMonitor},
+    monitors::{MultiMonitor, OnDiskTomlMonitor, tui::TuiMonitor},
     mutators::{
         havoc_mutations::havoc_mutations,
         scheduled::{tokens_mutations, StdScheduledMutator},
@@ -140,10 +140,11 @@ pub extern "C" fn libafl_main() {
 
     let shmem_provider = StdShMemProvider::new().expect("Failed to init shared memory");
 
-    let monitor = OnDiskTomlMonitor::new(
-        "./fuzzer_stats.toml",
-        MultiMonitor::new(|s| println!("{s}")),
-    );
+    let monitor = TuiMonitor::builder().title("libpng-inprocess-test").build();
+    // let monitor = OnDiskTomlMonitor::new(
+    //     "./fuzzer_stats.toml",
+    //     MultiMonitor::new(|s| println!("{s}")),
+    // );
 
     let mut run_client = |state: Option<_>, mut restarting_mgr, _client_description| {
         // Create an observation channel using the coverage map
