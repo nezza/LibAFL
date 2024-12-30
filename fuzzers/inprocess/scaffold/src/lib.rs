@@ -7,22 +7,22 @@ use std::{env, net::SocketAddr, path::PathBuf};
 
 use clap::{self, Parser};
 use libafl::{
-    corpus::{Corpus, InMemoryCorpus, OnDiskCorpus},
-    events::{launcher::Launcher, EventConfig},
+    corpus::{CachedOnDiskCorpus, Corpus, InMemoryCorpus, OnDiskCorpus},
+    events::{launcher::Launcher, EventConfig, SimpleEventManager},
     executors::{inprocess::InProcessExecutor, ExitKind},
     feedback_or, feedback_or_fast,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     fuzzer::{Fuzzer, StdFuzzer},
     inputs::{BytesInput, HasTargetBytes},
-    monitors::{MultiMonitor, OnDiskTomlMonitor, tui::TuiMonitor},
+    monitors::{tui::TuiMonitor, MultiMonitor, OnDiskTomlMonitor},
     mutators::{
         havoc_mutations::havoc_mutations,
         scheduled::{tokens_mutations, StdScheduledMutator},
-        token_mutations::Tokens,
+        token_mutations::Tokens, I2SRandReplace,
     },
     observers::{CanTrack, HitcountsMapObserver, TimeObserver},
-    schedulers::{IndexesLenTimeMinimizerScheduler, QueueScheduler},
-    stages::mutational::StdMutationalStage,
+    schedulers::{powersched::PowerSchedule, IndexesLenTimeMinimizerScheduler, QueueScheduler, StdWeightedScheduler},
+    stages::{mutational::StdMutationalStage, CalibrationStage, StdPowerMutationalStage, TracingStage},
     state::{HasCorpus, StdState},
     Error, HasMetadata,
 };
@@ -33,7 +33,7 @@ use libafl_bolts::{
     tuples::{tuple_list, Merge},
     AsSlice,
 };
-use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, std_edges_map_observer};
+use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, std_edges_map_observer, CmpLogObserver};
 use mimalloc::MiMalloc;
 
 #[global_allocator]
@@ -141,11 +141,12 @@ pub extern "C" fn libafl_main() {
     let shmem_provider = StdShMemProvider::new().expect("Failed to init shared memory");
 
     let monitor = TuiMonitor::builder().title("libpng-inprocess-test").build();
+    
     // let monitor = OnDiskTomlMonitor::new(
-    //     "./fuzzer_stats.toml",
-    //     MultiMonitor::new(|s| println!("{s}")),
+    //      "./fuzzer_stats.toml",
+    //      MultiMonitor::new(|s| println!("{s}")),
     // );
-
+    
     let mut run_client = |state: Option<_>, mut restarting_mgr, _client_description| {
         // Create an observation channel using the coverage map
         let edges_observer =
@@ -156,13 +157,22 @@ pub extern "C" fn libafl_main() {
 
         // Feedback to rate the interestingness of an input
         // This one is composed by two Feedbacks in OR
+        // let mut feedback = feedback_or!(
+        //     // New maximization map feedback linked to the edges observer and the feedback state
+        //     MaxMapFeedback::new(&edges_observer),
+        //     // Time feedback, this one does not need a feedback state
+        //     TimeFeedback::new(&time_observer)
+        // );
+
+        let map_feedback = MaxMapFeedback::new(&edges_observer);
+        let calibration = CalibrationStage::new(&map_feedback);
         let mut feedback = feedback_or!(
             // New maximization map feedback linked to the edges observer and the feedback state
-            MaxMapFeedback::new(&edges_observer),
+            map_feedback,
             // Time feedback, this one does not need a feedback state
             TimeFeedback::new(&time_observer)
         );
-
+    
         // A feedback to choose if an input is a solution or not
         let mut objective = feedback_or_fast!(CrashFeedback::new(), TimeoutFeedback::new());
 
@@ -172,10 +182,10 @@ pub extern "C" fn libafl_main() {
                 // RNG
                 StdRand::new(),
                 // Corpus that will be evolved, we keep it in memory for performance
-                InMemoryCorpus::new(),
+                CachedOnDiskCorpus::new(opt.output.join("queue"), 4096).unwrap(),
                 // Corpus in which we store solutions (crashes in this example),
                 // on disk so the user can get them after stopping the fuzzer
-                OnDiskCorpus::new(&opt.output).unwrap(),
+                OnDiskCorpus::new(opt.output.join("crashes")).unwrap(),
                 // States of the feedbacks.
                 // The feedbacks can report the data that should persist in the State.
                 &mut feedback,
@@ -187,58 +197,97 @@ pub extern "C" fn libafl_main() {
 
         println!("We're a client, let's fuzz :)");
 
-        // Create a PNG dictionary if not existing
-        if state.metadata_map().get::<Tokens>().is_none() {
-            state.add_metadata(Tokens::from([
-                vec![137, 80, 78, 71, 13, 10, 26, 10], // PNG header
-                "IHDR".as_bytes().to_vec(),
-                "IDAT".as_bytes().to_vec(),
-                "PLTE".as_bytes().to_vec(),
-                "IEND".as_bytes().to_vec(),
-            ]));
-        }
 
-        // Setup a basic mutator with a mutational stage
-        let mutator = StdScheduledMutator::new(havoc_mutations().merge(tokens_mutations()));
-        let mut stages = tuple_list!(StdMutationalStage::new(mutator));
+
+        // let mut stages = tuple_list!(StdMutationalStage::new(mutator));
 
         // A minimization+queue policy to get testcasess from the corpus
-        let scheduler =
-            IndexesLenTimeMinimizerScheduler::new(&edges_observer, QueueScheduler::new());
+        let scheduler = IndexesLenTimeMinimizerScheduler::new(
+            &edges_observer,
+            StdWeightedScheduler::with_schedule(
+                &mut state,
+                &edges_observer,
+                Some(PowerSchedule::fast()),
+            ),
+        );
 
         // A fuzzer with feedbacks and a corpus scheduler
         let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
 
+        // Example: Add a PNG dictionary. Not mandatory, but helps!
+        // if state.metadata_map().get::<Tokens>().is_none() {
+        //     state.add_metadata(Tokens::from([
+        //         vec![137, 80, 78, 71, 13, 10, 26, 10], // PNG header
+        //         "IHDR".as_bytes().to_vec(),
+        //         "IDAT".as_bytes().to_vec(),
+        //         "PLTE".as_bytes().to_vec(),
+        //         "IEND".as_bytes().to_vec(),
+        //     ]));
+        // }
+
+        // Setup a basic mutator with a mutational stage
+        // Mutators:
+        // - havoc_mutations - Bitflips, splicing, etc
+        // - tokens_mutations - Insert tokens from the dictionary above (if defined)
+        let mutator = StdScheduledMutator::new(havoc_mutations().merge(tokens_mutations()));
+
+    // The wrapped harness function, calling out to the LLVM-style harness
+    let mut harness = |input: &BytesInput| {
+        let target = input.target_bytes();
+        let buf = target.as_slice();
+        unsafe {
+            libfuzzer_test_one_input(buf);
+        }
+        ExitKind::Ok
+    };
+
+
+    let cmplog_observer = CmpLogObserver::new("cmplog", true);
+    
+    let i2s = StdMutationalStage::new(StdScheduledMutator::new(tuple_list!(I2SRandReplace::new())));
+    let power: StdPowerMutationalStage<_, _, BytesInput, _, _, _> =
+        StdPowerMutationalStage::new(mutator);
+        
+    let mut tracing_harness = harness;
+
+    // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
+    let mut executor = InProcessExecutor::with_timeout(
+        &mut harness,
+        tuple_list!(edges_observer, time_observer),
+        &mut fuzzer,
+        &mut state,
+        &mut restarting_mgr,
+        opt.timeout,
+    )?;
+
+    // Setup a tracing stage in which we log comparisons
+    let tracing = TracingStage::new(
+        InProcessExecutor::with_timeout(
+            &mut tracing_harness,
+            tuple_list!(cmplog_observer),
+            &mut fuzzer,
+            &mut state,
+            &mut restarting_mgr,
+            opt.timeout * 10,
+        )?,
+        // Give it more time!
+    );
+
+    // The order of the stages matter!
+    let mut stages = tuple_list!(calibration, tracing, i2s, power);
+
+
+
+
         // The wrapped harness function, calling out to the LLVM-style harness
-        let mut harness = |input: &BytesInput| {
-            let target = input.target_bytes();
-            let buf = target.as_slice();
-            unsafe {
-                libfuzzer_test_one_input(buf);
-            }
-            ExitKind::Ok
-        };
-
-        // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
-        #[cfg(target_os = "linux")]
-        let mut executor = InProcessExecutor::batched_timeout(
-            &mut harness,
-            tuple_list!(edges_observer, time_observer),
-            &mut fuzzer,
-            &mut state,
-            &mut restarting_mgr,
-            opt.timeout,
-        )?;
-
-        #[cfg(not(target_os = "linux"))]
-        let mut executor = InProcessExecutor::with_timeout(
-            &mut harness,
-            tuple_list!(edges_observer, time_observer),
-            &mut fuzzer,
-            &mut state,
-            &mut restarting_mgr,
-            opt.timeout,
-        )?;
+        // let mut harness = |input: &BytesInput| {
+        //     let target = input.target_bytes();
+        //     let buf = target.as_slice();
+        //     unsafe {
+        //         libfuzzer_test_one_input(buf);
+        //     }
+        //     ExitKind::Ok
+        // };
 
         // The actual target run starts here.
         // Call LLVMFUzzerInitialize() if present.

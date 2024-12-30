@@ -1,9 +1,9 @@
 use std::env;
 
-use libafl_cc::{ClangWrapper, CompilerWrapper, Configuration, ToolWrapper};
+use libafl_cc::{ClangWrapper, CompilerWrapper, Configuration, LLVMPasses, ToolWrapper};
 
 pub fn main() {
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
     if args.len() > 1 {
         let mut dir = env::current_exe().unwrap();
         let wrapper_name = dir.file_name().unwrap().to_str().unwrap();
@@ -15,7 +15,7 @@ pub fn main() {
         };
 
         dir.pop();
-
+        args.push("-fsanitize-coverage=trace-pc-guard,trace-cmp".into());
         let mut cc = ClangWrapper::new();
         if let Some(code) = cc
             .cpp(is_cpp)
@@ -23,20 +23,10 @@ pub fn main() {
             .silence(true)
             .parse_args(&args)
             .expect("Failed to parse the command line")
+            // libafl_runtime is defined in Cargo.toml [lib]
             .link_staticlib(&dir, "libafl_runtime")
-            .add_configuration(Configuration::GenerateCoverageMap)
-            .add_configuration(Configuration::Compound(vec![
-                Configuration::GenerateCoverageMap,
-                Configuration::CmpLog,
-            ]))
-            .add_configuration(Configuration::Compound(vec![
-                Configuration::GenerateCoverageMap,
-                Configuration::AddressSanitizer,
-            ]))
-            .add_configuration(Configuration::Compound(vec![
-                Configuration::GenerateCoverageMap,
-                Configuration::UndefinedBehaviorSanitizer,
-            ]))
+            .add_pass(LLVMPasses::CmpLogRtn)
+            .add_pass(LLVMPasses::AutoTokens)
             .run()
             .expect("Failed to run the wrapped compiler")
         {

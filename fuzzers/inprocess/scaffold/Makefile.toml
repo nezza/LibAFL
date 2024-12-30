@@ -64,7 +64,7 @@ script_runner = "@shell"
 script = '''
 cd libpng-1.6.37 && CC="${CARGO_TARGET_DIR}/${PROFILE_DIR}/libafl_cc" CXX="${CARGO_TARGET_DIR}/${PROFILE_DIR}/libafl_cxx" CFLAGS="-std=c89" ./configure --enable-shared=no --with-pic=yes --enable-hardware-optimizations=yes
 cd "${PROJECT_DIR}"
-make -C libpng-1.6.37 CC="${CARGO_TARGET_DIR}/${PROFILE_DIR}/libafl_cc" CXX="${CARGO_TARGET_DIR}/${PROFILE_DIR}/libafl_cxx" CFLAGS="-std=c89" LIBTOOL=${CARGO_TARGET_DIR}/${PROFILE_DIR}/libafl_libtool
+make -C libpng-1.6.37 CC="${CARGO_TARGET_DIR}/${PROFILE_DIR}/libafl_cc" CXX="${CARGO_TARGET_DIR}/${PROFILE_DIR}/libafl_cxx" CFLAGS="-std=c89"
 '''
 dependencies = ["libpng", "cxx", "cc"]
 
@@ -98,7 +98,7 @@ windows_alias = "unsupported"
 [tasks.run_unix]
 script_runner = "@shell"
 script = '''
-./${FUZZER_NAME}.coverage --broker-port 21337 --cores 0 --input ./corpus
+./${FUZZER_NAME} --broker-port 21337 --cores 0 --input ./corpus
 '''
 dependencies = ["fuzzer"]
 
@@ -112,7 +112,7 @@ windows_alias = "unsupported"
 script_runner = "@shell"
 script = '''
 rm -rf libafl_unix_shmem_server || true
-timeout 31s ./${FUZZER_NAME}.coverage --broker-port 21337 --cores 0 --input ./corpus | tee fuzz_stdout.log || true
+timeout 31s ./${FUZZER_NAME} --broker-port 21337 --cores 0 --input ./corpus | tee fuzz_stdout.log || true
 if grep -qa "corpus: 30" fuzz_stdout.log; then
     echo "Fuzzer is working"
 else
